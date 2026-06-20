@@ -1,0 +1,383 @@
+const express = require('express');
+const cors = require('cors');
+const app = express();
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+require('dotenv').config();
+
+const port = process.env.PORT || 3000;
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
+
+// ==-== old version code  Bring it from firebase service account ==-== 
+// const admin = require("firebase-admin");
+// const serviceAccount = require("./zap-shift-firebase-adminsdk.json.json");
+ // it is download from generate key from service account then transfer this file into backend server then call it in this section 
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount)
+// });
+
+// ==-==  Latest version code ==-== //
+const { initializeApp, cert } = require("firebase-admin/app");
+const admin = require("firebase-admin");
+const { getAuth } = require("firebase-admin/auth");
+const serviceAccount = require("./zap-shift-firebase-adminsdk.json.json");
+
+initializeApp({
+  credential: cert(serviceAccount)
+});
+
+ // ==-== verify Firebase Token middle ware ==-== //
+ const verifyFBToken = async (req, res, next) =>{
+
+      const token = req.headers.authorization;
+
+      if(!token || !token.startsWith('Bearer') ) {
+        return res.status(401).send({message: 'unauthorized access'})
+      }
+
+      try {
+          const idToken = token.split(' ')[1];
+          const decoded = await getAuth().verifyIdToken(idToken);
+          console.log('decoded in the token :', decoded);
+          req.decoded_email = decoded.email;
+           next();
+      }
+      catch(err) {
+          console.error('Firebase Auth Error:', err.message);
+          return res.status(403).send({ message: 'forbidden access' })
+      } 
+ }
+
+
+// ==-== Function for creating Tracking Id ==-== //
+const generateTrackingId = () => {
+    const prefix = "ZAP";
+    const year = new Date().getFullYear(); 
+    const randomChars = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `${prefix}-${year}-${randomChars}`;
+};
+
+
+// =-= Middleware =-=  
+ app.use(express.json());
+ app.use(cors());
+
+
+ 
+
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.w0obvc9.mongodb.net/?appName=Cluster0`;
+
+// ==-== MongoDB client creating ==-==
+  
+
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
+});
+
+async function run() {
+  try {
+    await client.connect();
+
+// ==-== Creating Database Collections ==-== //
+    const db = client.db('zap_shift_db');
+    const userCollection = db.collection('users');
+    const riderCollection = db.collection('riders');
+    const parcelsCollection = db.collection('parcels');
+    const paymentCollection = db.collection('payments');
+    
+
+  // ===--== Users Related APIs Started ===-===-=== //
+    app.post('/users', async(req, res) => {
+        const user = req.body;
+        user.role = 'user';
+        user.createdAt = new Date();
+        const email = user.email;
+
+         // =-= checking is user exist or not =-= // 
+            const userExist = await userCollection.findOne({email});
+            console.log( 'userExisting information : ' ,userExist);
+
+            if(userExist) {
+              return res.send({message: 'user already exist'})
+            }
+
+        const result = await userCollection.insertOne(user);
+        res.send(result);
+    })
+
+     // ===--== Users Related APIs End ===-===-=== //
+
+ // ==-== ======== ======Riders Related Apis Started ===== =====  ==-== //
+ app.get('/riders', async(req, res) =>{
+     const query = {};
+     if(req.query.status) {
+       query.status = req.query.status;
+     }
+     const cursor = riderCollection.find(query);
+     const result = await cursor.toArray(); 
+     res.send(result);
+ })
+
+ app.post('/riders', async(req, res) => {
+    const rider = req.body;
+    rider.status = 'pending';
+    rider.role = 'user',
+    rider.createdAt = new Date();
+    const result = await riderCollection.insertOne(rider);
+    res.send(result);
+    console.log(rider)
+ })
+
+    // == Approve Riders == //
+  app.patch('/riders/approve/:id', verifyFBToken, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const riderData = await riderCollection.findOne(query);
+        if (!riderData) {
+            return res.status(404).send({ message: "Rider application not found" });
+        }
+
+        const updatedDoc = {
+            $set: {
+                status: 'approved',
+                role: 'rider'
+            }
+        };
+        const result = await riderCollection.updateOne(query, updatedDoc);
+        
+            // Both usercollection and riderscollection user role ride set
+          if(riderData.email) {
+             const userQuery = {email: riderData.email};
+             const updatedUserDoc = {
+                $set :{
+                   role: 'rider'
+                }
+             }
+             await userCollection.updateOne(userQuery, updatedUserDoc)
+          }
+
+        res.send(result);
+
+
+    } catch (error) {
+        res.status(500).send({ message: error.message });
+    }
+});
+
+      // == Rejected Apis == //
+  app.patch('/riders/reject/:id', verifyFBToken, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const updatedDoc = {
+            $set: {
+                status: 'rejected' 
+            }
+        };
+        const result = await riderCollection.updateOne(query, updatedDoc);
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: error.message });
+    }
+});
+
+    // == Deleted APis == //
+  app.delete('/riders/delete/:id', verifyFBToken, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await riderCollection.deleteOne(query);
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: error.message });
+    }
+});
+
+// ==-== ===== ===== Riders Related Apis Ended ===== =====  ==-== //
+
+
+
+
+    // ==-== Parcels API to get specific items based on email ==-== // 
+    app.get('/parcels', async(req, res) => {
+      const query = {};
+
+      const {email} = req.query;
+
+      if(email)  {
+        query.senderEmail = email;
+      }
+      const options = { sort: { createdAt: -1 } }
+      const cursor = parcelsCollection.find(query, options);
+      const result = await cursor.toArray();
+      res.send(result);
+        
+    })
+
+    // ==-== api for specific single product id payment ==-== 
+    // its helps us to find out which product we pay for and the information of  this product we can send it backend from front end
+    app.get('/parcels/:id', async(req, res) => {
+        const id = req.params.id;
+        const query = {_id: new ObjectId(id)};
+        const result = await parcelsCollection.findOne(query);
+        res.send(result);
+    })
+
+    // ==-== Payment Method Stripe Api Add ==-== //
+    app.post('/create-checkout-session', async(req, res) => {
+        const paymentInfo = req.body;
+        const amount = parseInt(paymentInfo.cost) * 100
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+               price_data: {
+                 currency: 'USD',
+                  unit_amount: amount,
+                 product_data : {
+                   name: paymentInfo.parcelName
+                 },
+               },
+              quantity: 1,
+            },
+          ],
+           customer_email : paymentInfo.senderEmail,
+           mode: 'payment',
+           metadata: {
+              parcelId : paymentInfo.parcelId,
+              parcelName: paymentInfo.parcelName
+
+           },
+           success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+           cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+
+        })
+
+        //console.log(session);
+        //console.log('information about product:',paymentInfo)
+        res.send({url: session.url})
+    })
+
+    // ===-=== Confirmation Api after completing payment ===-=== //
+    app.patch('/payment-verify', async(req, res) => {
+       const sessionId = req.query.session_id;
+       const session = await stripe.checkout.sessions.retrieve(sessionId)
+
+      // console.log('session retrieve:', session);
+
+      //=========-====== Prevent double time payment history store to database ========-=======//
+        const transactionId = session.payment_intent;
+        const query = {transactionId : transactionId}
+        const paymentExist =  await paymentCollection.findOne(query)
+        if(paymentExist) {
+            return res.send({message: 'already exist ', transactionId, trackingId: paymentExist.trackingId})
+        }
+      // ===== ===== ===-=== ==== =======-===-==== =====-===== =======//
+
+       const trackingId = generateTrackingId();
+
+        if(session.payment_status === 'paid') {
+            const id = session.metadata.parcelId;
+            const query = {_id: new ObjectId(id)};
+            const update = {
+                $set : {
+                    paymentStatus : 'paid',
+                    trackingId: trackingId,
+                    createdAt : new Date()
+                }
+            }
+            const result = await parcelsCollection.updateOne(query, update);
+            
+            // for creating payment history store and display;
+              const payment = {
+                  amount : session.amount_total/100,
+                  currency: session.currency,
+                  customerEmail: session.customer_email,
+                  parcelId: session.metadata.parcelId,
+                  parcelName: session.metadata.parcelName,
+                  transactionId: session.payment_intent,
+                  paymentStatus: session.payment_status,
+                  trackingId: trackingId,
+                  paidAt: new Date()
+
+              }
+                // ==-== store in the separate collections so that we can show it  later in the separate file ==-== //
+              if(session.payment_status === 'paid') {
+                   const  paymentResult = await paymentCollection.insertOne(payment);
+                  return res.send({
+                     success: true,
+                     modifyParcel: result,
+                     paymentInfo: paymentResult,
+                     trackingId: trackingId,
+                     transactionId: session.payment_intent 
+
+                    })
+              }
+
+        }
+
+        return res.send({success: false, message: 'payment not completed yet'}) 
+
+
+    })
+
+    // ==-== Get all payment history from database ===-=== //
+    app.get('/payments', verifyFBToken, async(req, res) => {
+        const email = req.query.email;
+        const query = {};
+
+        // console.log('headers : ', req.headers)
+
+        if(email) {
+          query.customerEmail = email;
+
+          if(email !== req.decoded_email) {
+             return res.status(403).send({message: 'forbidden access'})
+          }
+        }
+        const cursor = paymentCollection.find(query);
+        const result = await cursor.toArray();
+        res.send(result);
+    })
+    
+
+    // Post API save data to database colleciton
+    app.post('/parcels', async(req, res) => {
+        const parcel = req.body;
+        parcel.createdAt = new Date();
+        const result = await parcelsCollection.insertOne(parcel);
+        res.send(result)
+    })
+
+    // Delete APi for parcels 
+    app.delete('/parcels/:id', async(req, res) => {
+       const id = req.params.id;
+       const query = { _id: new ObjectId(id) };
+       const result = await parcelsCollection.deleteOne(query);
+       res.send(result);
+       
+    })
+
+
+
+    await client.db("admin").command({ ping: 1 });
+    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+
+        
+
+  } catch(error) {
+    console.log("Database connection failed:", error)
+  }
+}
+run().catch(console.dir); 
+
+    app.get('/', (req, res) => {
+        res.send('zap shifting')
+        })
+
+app.listen(port, () => {
+  console.log(`Example app listening on port ${port}`)
+})
