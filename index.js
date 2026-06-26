@@ -213,7 +213,7 @@ async function run() {
     console.log(rider)
  })
 
-    // == Approve Riders == //
+    // == rider approve Riders == //
   app.patch('/riders/approve/:id', verifyFBToken, verifyAdmin, async (req, res) => {
     try {
         const id = req.params.id;
@@ -250,7 +250,7 @@ async function run() {
     }
 });
 
-      // == Rejected Apis == //
+      // == rider rejected Apis == //
   app.patch('/riders/reject/:id', verifyFBToken, verifyAdmin, async (req, res) => {
     try {
         const id = req.params.id;
@@ -268,7 +268,7 @@ async function run() {
     }
 });
 
-    // == Deleted  riders APis == //
+    // == riders deleted APis == //
   app.delete('/riders/delete/:id', verifyFBToken, verifyAdmin, async (req, res) => {
     try {
         const id = req.params.id;
@@ -285,22 +285,72 @@ async function run() {
 
 
 
-    // ==-== Parcels API to get specific items based on email ==-== // 
-    app.get('/parcels', async(req, res) => {
-      const query = {};
-      const {email, deliveryStatus} = req.query;
-      if(email)  {
-        query.senderEmail = email;
-      }
-      if(deliveryStatus)  {
-        query.deliveryStatus = deliveryStatus;
-      }
-      const options = { sort: { createdAt: -1 } }
-      const cursor = parcelsCollection.find(query, options);
-      const result = await cursor.toArray();
-      res.send(result);
-        
+// ==-== Parcels API to get specific items based on email ==-== // 
+
+    // save parcel to database colleciton
+    app.post('/parcels', async(req, res) => {
+        const parcel = req.body;
+        console.log('Data info from sender Parcel Form : ' , parcel)
+        parcel.createdAt = new Date();
+        const result = await parcelsCollection.insertOne(parcel);
+        res.send(result)
     })
+
+    // Delete APi for parcels 
+    app.delete('/parcels/:id', async(req, res) => {
+       const id = req.params.id;
+       const query = { _id: new ObjectId(id) };
+       const result = await parcelsCollection.deleteOne(query);
+       res.send(result);
+    })
+
+  app.get('/parcels', async (req, res) => {
+    try {
+        const query = {};
+        const { email, deliveryStatus } = req.query;
+
+        if (email) {
+            query.senderEmail = email;
+        }
+
+        if (deliveryStatus) {
+           query.deliveryStatus = { $in: ['pending-pickup', 'rejected'] }
+        }
+
+        
+
+        
+        const options = { sort: { createdAt: -1 } };
+        const cursor = parcelsCollection.find(query, options);
+        const result = await cursor.toArray();
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: error.message });
+    }
+});
+
+
+app.get('/parcels/rider', async (req, res) => {
+    try {
+        const { riderEmail, deliveryStatus } = req.query;
+        const query = {};
+
+        if (riderEmail) {
+            query.riderEmail = riderEmail;
+        }
+
+        if (deliveryStatus) {
+            query.deliveryStatus = { $in: ['assigned to rider', 'accepted', 'parcel picked up'] }; 
+        }
+
+        const options = { sort: { createdAt: -1 } }; 
+        const cursor = parcelsCollection.find(query, options);
+        const result = await cursor.toArray();
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: error.message });
+    }
+});
 
     // ==-== api for specific single product id payment ==-== 
     // its helps us to find out which product we pay for and the information of  this product we can send it backend from front end
@@ -311,7 +361,81 @@ async function run() {
         res.send(result);
     })
 
-    // ==-== Payment Method Stripe Api Add ==-== //
+// =-= Api for parcels "Assign to rider" =-= //
+     app.patch('/parcels/:id', async(req, res) => {
+         const {riderId, riderName, riderEmail} = req.body;
+         const id = req.params.id;
+         const  query = {_id: new ObjectId(id)};
+
+         const updateDoc = {
+            $set : {
+                deliveryStatus: 'assigned to rider',
+                riderId : riderId,
+                riderEmail : riderEmail,
+                riderName : riderName 
+            }
+         }
+
+            const result = await parcelsCollection.updateOne(query, updateDoc)
+
+            // ==-== now update rider status ==-== //
+            const riderQuery = {_id : new ObjectId(riderId)};
+            const riderUpdateDoc = {
+                $set : {
+                    workStatus: 'in_transit'
+                }
+            }
+
+            const riderResult = await riderCollection.updateOne(riderQuery, riderUpdateDoc);
+            res.send(riderResult);
+
+    })
+
+
+    // ==-== api for rider reject or accept parcel ==-== //
+
+app.patch('/parcels/status/:id', async (req, res) => {
+    try {
+        const id = req.params.id;
+        const { deliveryStatus } = req.body;
+        console.log('Incoming deliveryStatus : ', deliveryStatus);
+
+        const query = { _id: new ObjectId(id) };
+        
+        let updateParcelStatus = {
+            $set: {
+                deliveryStatus: deliveryStatus
+            }
+        };
+
+        if (deliveryStatus === 'rejected') {
+            updateParcelStatus = {
+            
+                $set: { 
+                    deliveryStatus: deliveryStatus 
+                },
+                $unset: {
+                    riderEmail: "",
+                    riderName: "",
+                    riderId: ""
+                }
+            };
+        }
+
+        const result = await parcelsCollection.updateOne(query, updateParcelStatus);
+        res.send(result);
+        
+    } catch (error) {
+        console.error("Error updating status:", error);
+        res.status(500).send({ message: error.message });
+    }
+});
+
+
+
+
+// ===  === ==-== Payment Method Stripe Api Add ==-== ===  ===  ====  //
+
     app.post('/create-checkout-session', async(req, res) => {
         const paymentInfo = req.body;
         const amount = parseInt(paymentInfo.cost) * 100
@@ -345,38 +469,7 @@ async function run() {
         res.send({url: session.url})
     })
 
-    app.patch('/parcels/:id', async(req, res) => {
-         const {riderId, riderName, riderEmail} = req.body;
-         const id = req.params.id;
-         const  query = {_id: new ObjectId(id)};
-
-         const updateDoc = {
-            $set : {
-                deliveryStatus: 'assigned to rider',
-                riderId : riderId,
-                riderEmail : riderEmail,
-                riderName : riderName 
-            }
-         }
-
-            const result = await parcelsCollection.updateOne(query, updateDoc)
-
-            // ==-== now update rider status ==-== //
-
-            const riderQuery = {_id : new ObjectId(riderId)};
-            const riderUpdateDoc = {
-                $set : {
-                    workStatus: 'in_transit'
-                }
-            }
-
-            const riderResult = await riderCollection.updateOne(riderQuery, riderUpdateDoc);
-            res.send(riderResult);
-
-    })
-
-
-
+   
 
 
     // ===-=== Confirmation Api after completing payment ===-=== //
@@ -462,25 +555,6 @@ async function run() {
         res.send(result);
     })
     
-
-    // Post API save data to database colleciton
-    app.post('/parcels', async(req, res) => {
-        const parcel = req.body;
-        parcel.createdAt = new Date();
-        const result = await parcelsCollection.insertOne(parcel);
-        res.send(result)
-    })
-
-    // Delete APi for parcels 
-    app.delete('/parcels/:id', async(req, res) => {
-       const id = req.params.id;
-       const query = { _id: new ObjectId(id) };
-       const result = await parcelsCollection.deleteOne(query);
-       res.send(result);
-       
-    })
-
-
 
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
