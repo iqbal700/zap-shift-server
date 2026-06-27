@@ -107,7 +107,6 @@ async function run() {
 
 
     // ==-== Functions for Trackings Parcels Status Information ==-== //
-
     const logTracking = async(trackingId, status) => {
         const log = {
             trackingId,
@@ -115,14 +114,12 @@ async function run() {
             details : status.split('-').join(' '),
             createdAt : new Date()
         }
-
         const result = await trackingsCollection.insertOne(log);
         return result;
     }
 
 
     // ==-= Tracking Related APis ==-== 
-
     app.get('/trackings/:trackId/logs', async(req, res) => {
         const trackingId = req.params.trackId;
         const query = {trackingId};
@@ -314,16 +311,19 @@ async function run() {
 
 // ==-== Parcels API to get specific items based on email ==-== // 
 
-    // save parcel to database colleciton
+// ===-=== save parcel to database collection ===-=== //
     app.post('/parcels', async(req, res) => {
         const parcel = req.body;
-        console.log('Data info from sender Parcel Form : ' , parcel)
+        const trackingId = generateTrackingId();
+        //console.log('Data info from sender Parcel Form:' , parcel)
         parcel.createdAt = new Date();
+        parcel.trackingId = trackingId;
+        logTracking(trackingId, 'parcel-created' )
         const result = await parcelsCollection.insertOne(parcel);
         res.send(result)
     })
 
-    // Delete APi for parcels 
+// Delete APi for parcels 
     app.delete('/parcels/:id', async(req, res) => {
        const id = req.params.id;
        const query = { _id: new ObjectId(id) };
@@ -512,7 +512,8 @@ app.get('/parcels/rider', async (req, res) => {
            mode: 'payment',
            metadata: {
               parcelId : paymentInfo.parcelId,
-              parcelName: paymentInfo.parcelName
+              parcelName: paymentInfo.parcelName,
+              trackingId: paymentInfo.trackingId
 
            },
            success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -535,16 +536,18 @@ app.get('/parcels/rider', async (req, res) => {
 
       // console.log('session retrieve:', session);
 
-      //=========-====== Prevent double time payment history store to database ========-=======//
+      //=====-=== Prevent double time payment history store to database ======-======//
         const transactionId = session.payment_intent;
         const query = {transactionId : transactionId}
         const paymentExist =  await paymentCollection.findOne(query)
         if(paymentExist) {
-            return res.send({message: 'already exist ', transactionId, trackingId: paymentExist.trackingId})
+            return res.send({message: 'already exist payment history', transactionId, trackingId: paymentExist.trackingId})
         }
       // ===== ===== ===-=== ==== =======-===-==== =====-===== =======//
 
-       const trackingId = generateTrackingId();
+
+         // const trackingId = generateTrackingId(); // cant use double trackId;
+            const trackingId = session.metadata.trackingId; //using trackId during the parcel create that time ==-== //
 
         if(session.payment_status === 'paid') {
             const id = session.metadata.parcelId;
@@ -553,7 +556,7 @@ app.get('/parcels/rider', async (req, res) => {
                 $set : {
                     paymentStatus : 'paid',
                     deliveryStatus: 'pending-pickup',
-                    trackingId: trackingId,
+                    //trackingId: trackingId,
                     createdAt : new Date()
                 }
             }
