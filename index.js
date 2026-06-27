@@ -84,7 +84,6 @@ async function run() {
     // middle ware for verifying admin , checking who is making users admin or delete is he admin or others users , must used after verifyFBToken
 
     const verifyAdmin = async (req, res, next) => {
-
         const email = req.decoded_email;
         const query = {email};
         const  user = await userCollection.findOne(query);
@@ -93,9 +92,22 @@ async function run() {
             return res.status(403).send({message: 'forbidden to access'})
         }
         next();
-
-
     }
+
+// ==-== rider Verifying ==-==
+    const verifyRider = async (req, res, next) => {
+        const email = req.decoded_email;
+        const query = {email};
+        const  user = await userCollection.findOne(query);
+
+        if(!user || user.role !== 'rider') {
+            return res.status(403).send({message: 'forbidden to access'})
+        }
+        next();
+    }
+
+
+
 
 // ==-== Creating Database Collections ==-== //
     const db = client.db('zap_shift_db');
@@ -206,7 +218,7 @@ async function run() {
 
 
  // ==-== ======== ======Riders Related Apis Started ===== =====  ==-== //
- app.get('/riders', async(req, res) =>{
+ app.get('/riders', verifyRider, async(req, res) =>{
      const {status, district, workStatus} = req.query;
      const query = {};
 
@@ -227,7 +239,7 @@ async function run() {
      res.send(result);
  })
 
- app.post('/riders', async(req, res) => {
+ app.post('/riders', verifyRider, async(req, res) => {
     const rider = req.body;
     rider.status = 'pending';
     rider.role = 'user',
@@ -317,6 +329,7 @@ async function run() {
         const trackingId = generateTrackingId();
         //console.log('Data info from sender Parcel Form:' , parcel)
         parcel.createdAt = new Date();
+        parcel.deliveryStatus = 'parcel-created'
         parcel.trackingId = trackingId;
         logTracking(trackingId, 'parcel-created' )
         const result = await parcelsCollection.insertOne(parcel);
@@ -530,74 +543,83 @@ app.get('/parcels/rider', async (req, res) => {
 
 
     // ===-=== Confirmation Api after completing payment ===-=== //
-    app.patch('/payment-verify', async(req, res) => {
-       const sessionId = req.query.session_id;
-       const session = await stripe.checkout.sessions.retrieve(sessionId)
+app.patch('/payment-verify', async (req, res) => {
+    try {
+        const sessionId = req.query.session_id;
+        if (!sessionId) {
+            return res.status(400).send({ success: false, message: 'Missing session_id' });
+        }
 
-      // console.log('session retrieve:', session);
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-      //=====-=== Prevent double time payment history store to database ======-======//
+        // console.log('session retrieve:', session);
+
+        //=====-=== Prevent double time payment history store to database ======-======//
         const transactionId = session.payment_intent;
-        const query = {transactionId : transactionId}
-        const paymentExist =  await paymentCollection.findOne(query)
-        if(paymentExist) {
-            return res.send({message: 'already exist payment history', transactionId, trackingId: paymentExist.trackingId})
+
+        const query = { transactionId: transactionId };
+        const paymentExist = await paymentCollection.findOne(query);
+
+        if (paymentExist) {
+            return res.send({
+                success: true, 
+                message: 'already exist payment history',
+                transactionId,
+                trackingId: paymentExist.trackingId
+            });
         }
-      // ===== ===== ===-=== ==== =======-===-==== =====-===== =======//
+        // ===== ===== ===-=== ==== =======-===-==== =====-===== =======//
 
 
-         // const trackingId = generateTrackingId(); // cant use double trackId;
-            const trackingId = session.metadata.trackingId; //using trackId during the parcel create that time ==-== //
+        // const trackingId = generateTrackingId(); // cant use double trackId;
+        const trackingId = session.metadata.trackingId; //using trackId during the parcel create that time ==-== //
 
-        if(session.payment_status === 'paid') {
+        if (session.payment_status === 'paid') {
             const id = session.metadata.parcelId;
-            const query = {_id: new ObjectId(id)};
+            const query = { _id: new ObjectId(id) };
             const update = {
-                $set : {
-                    paymentStatus : 'paid',
+                $set: {
+                    paymentStatus: 'paid',
                     deliveryStatus: 'pending-pickup',
-                    //trackingId: trackingId,
-                    createdAt : new Date()
+                    paymentAt: new Date()
                 }
-            }
+            };
             const result = await parcelsCollection.updateOne(query, update);
-            
+
             // for creating payment history store and display;
-              const payment = {
-                  amount : session.amount_total/100,
-                  currency: session.currency,
-                  customerEmail: session.customer_email,
-                  parcelId: session.metadata.parcelId,
-                  parcelName: session.metadata.parcelName,
-                  transactionId: session.payment_intent,
-                  paymentStatus: session.payment_status,
-                  trackingId: trackingId,
-                  paidAt: new Date()
+            const payment = {
+                amount: session.amount_total / 100,
+                currency: session.currency,
+                customerEmail: session.customer_email,
+                parcelId: session.metadata.parcelId,
+                parcelName: session.metadata.parcelName,
+                transactionId: session.payment_intent,
+                paymentStatus: session.payment_status,
+                trackingId: trackingId,
+                paidAt: new Date()
+            };
 
-              }
-                // ==-== store in the separate collections so that we can show it  later in the separate file ==-== //
-              if(session.payment_status === 'paid') {
+            // ==-== store in the separate collections so that we can show it  later in the separate file ==-== //
+            const paymentResult = await paymentCollection.insertOne(payment);
 
-                   const  paymentResult = await paymentCollection.insertOne(payment);
+            await logTracking(trackingId, 'pending-pickup');
 
-                    logTracking(trackingId, 'pending-pickup')
-                   
-                   return res.send({
-                     success: true,
-                     modifyParcel: result,
-                     paymentInfo: paymentResult,
-                     trackingId: trackingId,
-                     transactionId: session.payment_intent 
-
-                    })
-              }
-
+            return res.send({
+                success: true,
+                modifyParcel: result,
+                paymentInfo: paymentResult,
+                trackingId: trackingId,
+                transactionId: session.payment_intent
+            });
         }
 
-        return res.send({success: false, message: 'payment not completed yet'}) 
+        return res.send({ success: false, message: 'payment not completed yet' });
 
-
-    })
+    } catch (error) {
+        console.error("Payment Verify Error:", error);
+        return res.status(500).send({ success: false, message: error.message });
+    }
+});
 
     // ==-== Get all payment history from database ===-=== //
     app.get('/payments', verifyFBToken, async(req, res) => {
@@ -617,6 +639,77 @@ app.get('/parcels/rider', async (req, res) => {
         const result = await cursor.toArray();
         res.send(result);
     })
+
+
+// ==-== Creating PipeLine for the DeliveryStatus ==-== //
+    app.get('/parcels/deliveryStatus/stats', async(req, res) => {
+        
+        const pipeLine = [
+                {
+                    $group : {
+                        _id : '$deliveryStatus',
+                        totalCount: { $sum: 1}
+                    }
+                }
+            ];
+
+        const result = await parcelsCollection.aggregate(pipeLine).toArray();
+        res.send(result);
+    })
+
+ // ==-== Creating PipeLine for the Delivery per day for riders ==-== //
+     app.get('/riders/delivery-par-day', async (req, res) => {
+        
+             const email = req.query.email;
+
+    const pipeLine = [
+        // ##1 filter specific rider with parcel delivered status
+        {
+            $match: {
+                riderEmail: email,
+                deliveryStatus: 'parcel delivered'
+            }
+        },
+        
+        // ##2 Add tracking data
+        {
+            $lookup: {
+                from: 'trackings',
+                localField: 'trackingId',
+                foreignField: 'trackingId',
+                as: 'parcels'
+            }
+        },
+
+        // ##3 separate date from createdAt according to the day
+        {
+            $group: {
+                _id: { 
+                    $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } 
+                },
+                totalDelivered: { $sum: 1 }
+            }
+        },
+
+        {
+            $sort: { 
+                _id: -1 // Latest Date come first
+            }
+        }
+    ];
+
+    try {
+        const result = await parcelsCollection.aggregate(pipeLine).toArray();
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: "Error calculating delivery stats", error });
+    }
+});
+
+
+
+
+
     
 
     await client.db("admin").command({ ping: 1 });
@@ -627,7 +720,11 @@ app.get('/parcels/rider', async (req, res) => {
   } catch(error) {
     console.log("Database connection failed:", error)
   }
+
+  
 }
+
+
 run().catch(console.dir); 
 
     app.get('/', (req, res) => {
